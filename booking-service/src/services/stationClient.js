@@ -60,8 +60,13 @@ const stationClient = {
           const cached = cacheGet(stationId);
           if (cached) return cached;
 
+          // admin-service mounts its station router at /stations, so the internal
+          // lookup lives at /stations/station/internal/:stationId. This used to call
+          // /station/internal/:stationId, which 404s — and because the caller swallows
+          // the error and falls back to null, every confirmation email has been going
+          // out without station names with nothing surfacing the failure.
           const station = await withRetry(async () => {
-               const { data } = await client.get(`/station/internal/${stationId}`);
+               const { data } = await client.get(`/stations/station/internal/${stationId}`);
                return data.data;
           });
 

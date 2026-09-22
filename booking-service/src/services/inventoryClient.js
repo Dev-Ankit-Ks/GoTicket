@@ -72,8 +72,14 @@ const inventoryClient = {
           });
      },
 
+     // Every mutating call below carries an idempotency key derived from the booking id
+     // and the operation, so it is STABLE across withRetry attempts. Without it, a
+     // request that succeeded but whose response was lost to a timeout gets applied
+     // twice — and on the segment path the retry also trips its own overlap/lock check
+     // and fails the booking with a spurious 409.
+
      // --- SEGMENT BOOKING: Added fromSeq/toSeq params to holdSeats, releaseSeats, confirmSeats ---
-     async holdSeats(scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq) {
+     async holdSeats(scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq, bookingId) {
           return withRetry(async () => {
                const { data } = await client.post('/seats/lock', {
                     scheduleId,
@@ -82,12 +88,13 @@ const inventoryClient = {
                     ttlSeconds,
                     fromSeq,  // --- SEGMENT BOOKING
                     toSeq,    // --- SEGMENT BOOKING
+                    idempotencyKey: bookingId ? `hold:${bookingId}` : undefined,
                });
                return data.data;
           });
      },
 
-     async releaseSeats(scheduleId, seatIds, userId, fromSeq, toSeq) {
+     async releaseSeats(scheduleId, seatIds, userId, fromSeq, toSeq, bookingId) {
           return withRetry(async () => {
                const { data } = await client.post('/seats/unlock', {
                     scheduleId,
@@ -95,6 +102,7 @@ const inventoryClient = {
                     userId,
                     fromSeq,  // --- SEGMENT BOOKING
                     toSeq,    // --- SEGMENT BOOKING
+                    idempotencyKey: bookingId ? `release:${bookingId}` : undefined,
                });
                return data.data;
           });
@@ -109,6 +117,7 @@ const inventoryClient = {
                     bookingId,
                     fromSeq,  // --- SEGMENT BOOKING
                     toSeq,    // --- SEGMENT BOOKING
+                    idempotencyKey: `confirm:${bookingId}`,
                });
                return data.data;
           });
@@ -120,6 +129,7 @@ const inventoryClient = {
                     scheduleId,
                     bookingId,
                     userId,
+                    idempotencyKey: `cancel:${bookingId}`,
                });
                return data.data;
           });

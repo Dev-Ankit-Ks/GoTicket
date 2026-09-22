@@ -109,6 +109,9 @@ model SeatSegmentLock {
 model IdempotencyRecord {
   id          String   @id @default(uuid())
   eventKey    String   @unique
+  // Stored result of the original call, replayed verbatim when booking-service
+  // retries a mutating request whose response it never received.
+  response    Json?
   processedAt DateTime @default(now())
 
   @@index([eventKey])

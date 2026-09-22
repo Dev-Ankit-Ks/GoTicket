@@ -33,6 +33,11 @@ enum SagaStepStatus {
   FAILED
 }
 
+enum IdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
 model Booking {
   id             String        @id @default(uuid())
   userId         String
@@ -114,11 +119,16 @@ model SagaLog {
 }
 
 model IdempotencyRecord {
-  id          String   @id @default(uuid())
-  eventKey    String   @unique
+  id          String            @id @default(uuid())
+  eventKey    String            @unique
+  // IN_PROGRESS is written BEFORE the work starts, so a concurrent duplicate
+  // request collides on eventKey instead of both proceeding.
+  status      IdempotencyStatus @default(COMPLETED)
   response    Json?
-  processedAt DateTime @default(now())
+  processedAt DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
 
   @@index([eventKey])
+  @@index([status, updatedAt])
   @@map("idempotency_records")
 }

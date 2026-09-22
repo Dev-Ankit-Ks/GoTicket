@@ -2,6 +2,7 @@ const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const inventoryProducer = require('../kafka/producer/inventory.producer');
 const { retryTransaction } = require('../utils/retryTransaction');
+const { withIdempotency, recordIdempotency } = require('../utils/idempotency');
 const { BadRequestError, NotFoundError, ConflictError, ForbiddenError } = require('../utils/error');
 const { config } = require('../config');
 
@@ -306,11 +307,11 @@ const getSeats = async (scheduleId, filters = {}) => {
 };
 
 // --- SEGMENT BOOKING: Added fromSeq/toSeq params for segment-aware locking ---
-const lockSeats = async (scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq) => {
+const lockSeats = async (scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq, idempotencyKey) => {
      const ttl = Math.min(Math.max(ttlSeconds || config.LOCK_TTL_SECONDS, 60), 600);
      const lockExpiresAt = new Date(Date.now() + ttl * 1000);
 
-     const result = await retryTransaction(async () => {
+     const result = await withIdempotency(idempotencyKey, (eventKey) => retryTransaction(async () => {
           return prisma.$transaction(async (tx) => {
                // Verify schedule is active
                const schedule = await tx.scheduleInventory.findUnique({ where: { scheduleId } });
@@ -400,7 +401,7 @@ const lockSeats = async (scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq
                     // Recount aggregates from actual seat rows (prevents counter drift)
                     const counts = await recountScheduleAggregates(tx, scheduleId);
 
-                    return {
+                    const segmentResult = {
                          scheduleId,
                          trainId: schedule.trainId,
                          lockedSeats: seats.map(s => ({
@@ -411,6 +412,11 @@ const lockSeats = async (scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq
                          lockExpiresAt,
                          counts,
                     };
+
+                    // Same transaction as the work: a rollback discards the key too.
+                    await recordIdempotency(tx, eventKey, segmentResult);
+
+                    return segmentResult;
                }
 
                // Full-journey: unconditional lock (original fast path)
@@ -432,7 +438,7 @@ const lockSeats = async (scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq
                     WHERE "scheduleId" = ${scheduleId}
                `;
 
-               return {
+               const fullJourneyResult = {
                     scheduleId,
                     trainId: schedule.trainId,
                     lockedSeats: seats.map(s => ({
@@ -447,8 +453,12 @@ const lockSeats = async (scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq
                          booked: schedule.booked,
                     },
                };
+
+               await recordIdempotency(tx, eventKey, fullJourneyResult);
+
+               return fullJourneyResult;
           }, { timeout: 10000 });
-     });
+     }));
 
      // Publish availability update (fire and forget)
      try {
@@ -464,8 +474,8 @@ const lockSeats = async (scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq
 };
 
 // --- SEGMENT BOOKING: Added fromSeq/toSeq params for segment-aware unlocking ---
-const unlockSeats = async (scheduleId, seatIds, userId, fromSeq, toSeq) => {
-     const result = await retryTransaction(async () => {
+const unlockSeats = async (scheduleId, seatIds, userId, fromSeq, toSeq, idempotencyKey) => {
+     const result = await withIdempotency(idempotencyKey, (eventKey) => retryTransaction(async () => {
           return prisma.$transaction(async (tx) => {
                // Row-level lock
                const seats = await tx.$queryRaw`
@@ -500,12 +510,16 @@ const unlockSeats = async (scheduleId, seatIds, userId, fromSeq, toSeq) => {
 
                     const schedule = await tx.scheduleInventory.findUnique({ where: { scheduleId } });
 
-                    return {
+                    const segmentResult = {
                          scheduleId,
                          trainId: schedule.trainId,
                          unlockedSeats: seats.map(s => s.seatId),
                          counts,
                     };
+
+                    await recordIdempotency(tx, eventKey, segmentResult);
+
+                    return segmentResult;
                }
 
                // Fallback: full-journey unlock (no segment params)
@@ -544,7 +558,7 @@ const unlockSeats = async (scheduleId, seatIds, userId, fromSeq, toSeq) => {
                     WHERE "scheduleId" = ${scheduleId}
                `;
 
-               return {
+               const fullJourneyResult = {
                     scheduleId,
                     trainId: schedule.trainId,
                     unlockedSeats: seats.map(s => s.seatId),
@@ -554,8 +568,12 @@ const unlockSeats = async (scheduleId, seatIds, userId, fromSeq, toSeq) => {
                          booked: schedule.booked,
                     },
                };
+
+               await recordIdempotency(tx, eventKey, fullJourneyResult);
+
+               return fullJourneyResult;
           }, { timeout: 10000 });
-     });
+     }));
 
      try {
           await inventoryProducer.publishSeatAvailabilityUpdated(
@@ -570,8 +588,8 @@ const unlockSeats = async (scheduleId, seatIds, userId, fromSeq, toSeq) => {
 };
 
 // --- SEGMENT BOOKING: Added fromSeq/toSeq params for segment-aware confirmation ---
-const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toSeq) => {
-     const result = await retryTransaction(async () => {
+const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toSeq, idempotencyKey) => {
+     const result = await withIdempotency(idempotencyKey, (eventKey) => retryTransaction(async () => {
           return prisma.$transaction(async (tx) => {
                const seats = await tx.$queryRaw`
                     SELECT id, "seatId", "seatNumber", status, "lockedBy"
@@ -631,7 +649,7 @@ const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toS
 
                     const schedule = await tx.scheduleInventory.findUnique({ where: { scheduleId } });
 
-                    return {
+                    const segmentResult = {
                          scheduleId,
                          trainId: schedule.trainId,
                          bookingId,
@@ -642,6 +660,10 @@ const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toS
                          })),
                          counts,
                     };
+
+                    await recordIdempotency(tx, eventKey, segmentResult);
+
+                    return segmentResult;
                }
 
                // Full-journey: unconditional confirm (original fast path)
@@ -665,7 +687,7 @@ const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toS
                     WHERE "scheduleId" = ${scheduleId}
                `;
 
-               return {
+               const fullJourneyResult = {
                     scheduleId,
                     trainId: schedule.trainId,
                     bookingId,
@@ -680,8 +702,12 @@ const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toS
                          booked: schedule.booked + seats.length,
                     },
                };
+
+               await recordIdempotency(tx, eventKey, fullJourneyResult);
+
+               return fullJourneyResult;
           }, { timeout: 10000 });
-     });
+     }));
 
      try {
           await inventoryProducer.publishSeatAvailabilityUpdated(
@@ -695,8 +721,8 @@ const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toS
      return result;
 };
 
-const cancelBooking = async (scheduleId, bookingId, userId) => {
-     const result = await retryTransaction(async () => {
+const cancelBooking = async (scheduleId, bookingId, userId, idempotencyKey) => {
+     const result = await withIdempotency(idempotencyKey, (eventKey) => retryTransaction(async () => {
           return prisma.$transaction(async (tx) => {
                // --- SEGMENT BOOKING: Check segment locks FIRST ---
                // For segment bookings, seat_inventories.bookingId is not set
@@ -719,13 +745,17 @@ const cancelBooking = async (scheduleId, bookingId, userId) => {
 
                     const schedule = await tx.scheduleInventory.findUnique({ where: { scheduleId } });
 
-                    return {
+                    const segmentResult = {
                          scheduleId,
                          trainId: schedule.trainId,
                          bookingId,
                          releasedSeats: affectedSeatIds,
                          counts,
                     };
+
+                    await recordIdempotency(tx, eventKey, segmentResult);
+
+                    return segmentResult;
                }
                // --- END SEGMENT BOOKING ---
 
@@ -763,7 +793,7 @@ const cancelBooking = async (scheduleId, bookingId, userId) => {
                     WHERE "scheduleId" = ${scheduleId}
                `;
 
-               return {
+               const fullJourneyResult = {
                     scheduleId,
                     trainId: schedule.trainId,
                     bookingId,
@@ -774,8 +804,12 @@ const cancelBooking = async (scheduleId, bookingId, userId) => {
                          booked: schedule.booked - seats.length,
                     },
                };
+
+               await recordIdempotency(tx, eventKey, fullJourneyResult);
+
+               return fullJourneyResult;
           }, { timeout: 10000 });
-     });
+     }));
 
      try {
           await inventoryProducer.publishSeatAvailabilityUpdated(

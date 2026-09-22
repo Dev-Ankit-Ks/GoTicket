@@ -5,6 +5,29 @@ const { getGateway } = require('./gateways/gateway.factory');
 const { BadRequestError, NotFoundError, ConflictError } = require('../utils/error');
 const { config } = require('../config');
 
+// ─── Optimistic Lock Helper (CAS — Compare-And-Swap) ─────────────────────────
+// The webhook and the browser's verify call routinely arrive within milliseconds
+// of each other. Without this, both read status CREATED, both write CAPTURED, and
+// both publish PAYMENT_SUCCESS. The `version` column existed for exactly this and
+// was never used — every status transition now goes through here.
+//
+// Returns true when this caller won the transition, false when another already did.
+// Callers must only emit side effects (Kafka, audit-of-record) when it returns true.
+
+const casUpdatePaymentOrder = async (paymentOrderId, expectedVersion, data) => {
+     const result = await prisma.paymentOrder.updateMany({
+          where: { id: paymentOrderId, version: expectedVersion },
+          data: { ...data, version: { increment: 1 } },
+     });
+
+     if (result.count === 0) {
+          logger.info(`CAS lost for payment order ${paymentOrderId} (expected version ${expectedVersion})`);
+          return false;
+     }
+
+     return true;
+};
+
 // ─── Idempotency Helper ──────────────────────────────────────────────────────
 
 const withIdempotency = async (key, fn) => {
@@ -157,16 +180,18 @@ const handlePaymentCaptured = async (paymentOrder, gatewayPaymentId, paymentEnti
           return { status: 'invalid_state', currentStatus: paymentOrder.status };
      }
 
-     // Update payment order
-     await prisma.paymentOrder.update({
-          where: { id: paymentOrder.id },
-          data: {
-               status: 'CAPTURED',
-               gatewayPaymentId,
-               gatewaySignature: paymentEntity.acquirer_data?.auth_code || null,
-               version: { increment: 1 },
-          },
+     // Claim the transition. If the client-side verify captured it first, bail out
+     // rather than publishing a second PAYMENT_SUCCESS for the same order.
+     const won = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, {
+          status: 'CAPTURED',
+          gatewayPaymentId,
+          gatewaySignature: paymentEntity.acquirer_data?.auth_code || null,
      });
+
+     if (!won) {
+          logger.info(`Payment ${paymentOrder.id} already captured by another path — webhook is a no-op`);
+          return { status: 'already_processed' };
+     }
 
      logger.info(`Payment captured: ${paymentOrder.id}`, { gatewayPaymentId });
 
@@ -195,15 +220,16 @@ const handlePaymentFailed = async (paymentOrder, gatewayPaymentId, paymentEntity
 
      const reason = paymentEntity.error_description || paymentEntity.error_reason || 'payment_failed';
 
-     await prisma.paymentOrder.update({
-          where: { id: paymentOrder.id },
-          data: {
-               status: 'FAILED',
-               gatewayPaymentId,
-               failureReason: reason,
-               version: { increment: 1 },
-          },
+     const won = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, {
+          status: 'FAILED',
+          gatewayPaymentId,
+          failureReason: reason,
      });
+
+     if (!won) {
+          logger.info(`Payment ${paymentOrder.id} already transitioned by another path — failure webhook is a no-op`);
+          return { status: 'already_processed' };
+     }
 
      logger.info(`Payment failed: ${paymentOrder.id}`, { reason });
 
@@ -234,23 +260,36 @@ const handleRefundProcessed = async (paymentOrder, refundEntity) => {
                data: { status: 'COMPLETED' },
           });
 
-          // Update parent payment order status
-          const allRefunds = await prisma.refund.findMany({
-               where: { paymentOrderId: paymentOrder.id },
-          });
+          // Recompute the parent order's status from the refunds that are now on record.
+          // Read fresh and CAS: concurrent refund webhooks for the same order would
+          // otherwise each compute a total from their own stale snapshot.
+          for (let attempt = 1; attempt <= 2; attempt++) {
+               const current = await prisma.paymentOrder.findUnique({
+                    where: { id: paymentOrder.id },
+                    include: { refunds: true },
+               });
 
-          const totalRefunded = allRefunds
-               .filter(r => r.status === 'COMPLETED' || r.id === refund.id)
-               .reduce((sum, r) => sum + r.amount, 0);
+               if (!current) break;
 
-          const newStatus = totalRefunded >= paymentOrder.amount ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+               const totalRefunded = current.refunds
+                    .filter(r => r.status === 'COMPLETED')
+                    .reduce((sum, r) => sum + r.amount, 0);
 
-          await prisma.paymentOrder.update({
-               where: { id: paymentOrder.id },
-               data: { status: newStatus, version: { increment: 1 } },
-          });
+               const newStatus = totalRefunded >= current.amount ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
 
-          logger.info(`Refund processed: ${gatewayRefundId}`, { newStatus });
+               const won = await casUpdatePaymentOrder(current.id, current.version, { status: newStatus });
+
+               if (won) {
+                    logger.info(`Refund processed: ${gatewayRefundId}`, { newStatus, totalRefunded });
+                    break;
+               }
+
+               if (attempt === 2) {
+                    logger.warn(`Could not update order status after refund ${gatewayRefundId} — concurrent write won twice`, {
+                         paymentOrderId: current.id,
+                    });
+               }
+          }
      }
 
      return { status: 'refund_processed', gatewayRefundId };
@@ -304,37 +343,46 @@ const verifyAndCapturePayment = async (paymentOrderId, gatewayPaymentId, gateway
      });
 
      if (!isValid) {
-          await prisma.paymentOrder.update({
-               where: { id: paymentOrder.id },
-               data: {
-                    status: 'FAILED',
-                    failureReason: 'signature_verification_failed',
-                    version: { increment: 1 },
-               },
+          const wonFailure = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, {
+               status: 'FAILED',
+               failureReason: 'signature_verification_failed',
           });
 
-          // Publish failure
-          await paymentProducer.publishPaymentFailed(
-               paymentOrder.id,
-               paymentOrder.bookingId,
-               'signature_verification_failed'
-          ).catch(err => {
-               logger.error('Failed to publish PAYMENT_FAILED after sig failure', { error: err.message });
-          });
+          // Only announce the failure if we actually moved the order into it — a
+          // concurrent webhook may have legitimately captured it in the meantime.
+          if (wonFailure) {
+               await paymentProducer.publishPaymentFailed(
+                    paymentOrder.id,
+                    paymentOrder.bookingId,
+                    'signature_verification_failed'
+               ).catch(err => {
+                    logger.error('Failed to publish PAYMENT_FAILED after sig failure', { error: err.message });
+               });
+          }
 
           throw new BadRequestError('Payment signature verification failed', 'INVALID_SIGNATURE');
      }
 
-     // Signature valid — capture payment
-     await prisma.paymentOrder.update({
-          where: { id: paymentOrder.id },
-          data: {
-               status: 'CAPTURED',
-               gatewayPaymentId,
-               gatewaySignature,
-               version: { increment: 1 },
-          },
+     // Signature valid — claim the capture.
+     const won = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, {
+          status: 'CAPTURED',
+          gatewayPaymentId,
+          gatewaySignature,
      });
+
+     if (!won) {
+          // The webhook captured it first. That path already published PAYMENT_SUCCESS,
+          // so report success to the browser without emitting a duplicate event.
+          const fresh = await prisma.paymentOrder.findUnique({ where: { id: paymentOrder.id } });
+          logger.info(`Payment ${paymentOrder.id} already captured by webhook — verify is a no-op`);
+
+          return {
+               paymentOrderId: paymentOrder.id,
+               status: fresh?.status || 'CAPTURED',
+               gatewayPaymentId: fresh?.gatewayPaymentId || gatewayPaymentId,
+               message: 'Payment already captured',
+          };
+     }
 
      await prisma.paymentAuditLog.create({
           data: {
@@ -419,14 +467,19 @@ const initiateRefund = async (paymentOrderId, amount, reason, idempotencyKey) =>
                },
           });
 
-          // Update payment order status
-          await prisma.paymentOrder.update({
-               where: { id: paymentOrder.id },
-               data: {
-                    status: 'REFUND_INITIATED',
-                    version: { increment: 1 },
-               },
+          // Update payment order status. The gateway refund has already been accepted
+          // at this point, so losing the CAS is not a failure — the refund record is the
+          // source of truth and handleRefundProcessed will settle the order status when
+          // the webhook lands. Log it rather than unwinding a real refund.
+          const won = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, {
+               status: 'REFUND_INITIATED',
           });
+
+          if (!won) {
+               logger.warn(`Refund ${refund.id} recorded but order status was changed concurrently`, {
+                    paymentOrderId: paymentOrder.id,
+               });
+          }
 
           // Audit log
           await prisma.paymentAuditLog.create({

@@ -52,10 +52,17 @@ class RazorpayGateway extends BaseGateway {
                .update(body)
                .digest('hex');
 
-          return crypto.timingSafeEqual(
-               Buffer.from(expectedSignature, 'hex'),
-               Buffer.from(signature, 'hex')
-          );
+          // timingSafeEqual throws RangeError when the buffers differ in length, which
+          // an attacker-supplied short/malformed signature trivially causes. A failed
+          // verification is a rejection, not a crash — mirror verifyWebhookSignature.
+          try {
+               return crypto.timingSafeEqual(
+                    Buffer.from(expectedSignature, 'hex'),
+                    Buffer.from(signature, 'hex')
+               );
+          } catch {
+               return false;
+          }
      }
 
      verifyWebhookSignature(rawBody, signature) {

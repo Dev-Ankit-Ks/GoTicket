@@ -5,6 +5,7 @@ const { redis } = require('../config/redis');
 const { forceReleaseSeatLocks } = require('./distributedLock');
 const { compensateAll } = require('../services/saga.service');
 const { userClient } = require('../services/userClient');
+const bookingService = require('../services/booking.service');
 const bookingProducer = require('../kafka/producer/booking.producer');
 
 const fetchUserForNotification = async (userId) => {
@@ -53,13 +54,8 @@ async function tryAcquireLeadership() {
  * and marks them as EXPIRED.
  */
 async function cleanExpiredBookings() {
-     // Leader election: only one instance runs per cycle
-     const isLeader = await tryAcquireLeadership();
-     if (!isLeader) {
-          logger.debug('Skipping expiry job — another instance is the leader');
-          return;
-     }
-
+     // Leader election happens once per cycle in runExpiryCycle, which drives both
+     // this pass and the stuck-booking recovery pass.
      try {
           const expiredBookings = await prisma.booking.findMany({
                where: {
@@ -136,14 +132,68 @@ async function cleanExpiredBookings() {
      }
 }
 
+/**
+ * Second pass: resume bookings abandoned in a transient state.
+ *
+ * CONFIRMING and CANCELLING have no timeout and are not covered by the scan above,
+ * so a process that died mid-saga used to wedge a booking permanently — seats locked,
+ * payment captured, no ticket, and cancelBooking refusing to touch it.
+ *
+ * Runs under the same leader election as the expiry pass.
+ */
+async function recoverStuckBookings() {
+     const cutoff = new Date(Date.now() - config.STUCK_BOOKING_THRESHOLD_MS);
+
+     const stuck = await prisma.booking.findMany({
+          where: {
+               status: { in: ['CONFIRMING', 'CANCELLING'] },
+               updatedAt: { lt: cutoff },
+          },
+          include: { seats: true },
+     });
+
+     if (stuck.length === 0) return;
+
+     logger.warn(`Found ${stuck.length} booking(s) stuck in a transient state`);
+
+     for (const booking of stuck) {
+          try {
+               await bookingService.recoverStuckBooking(booking);
+          } catch (error) {
+               logger.error(`Failed to recover stuck booking ${booking.id}`, {
+                    status: booking.status,
+                    error: error.message,
+               });
+          }
+     }
+}
+
+async function runExpiryCycle() {
+     // Leader election covers both passes: one instance per cycle.
+     const isLeader = await tryAcquireLeadership();
+     if (!isLeader) {
+          logger.debug('Skipping expiry job — another instance is the leader');
+          return;
+     }
+
+     await cleanExpiredBookings();
+
+     try {
+          await recoverStuckBookings();
+     } catch (error) {
+          logger.error('Error in stuck-booking recovery pass', { error: error.message });
+     }
+}
+
 function startBookingExpiryJob() {
      // Run immediately once
-     cleanExpiredBookings();
+     runExpiryCycle();
 
      // Then run on interval
-     expiryInterval = setInterval(cleanExpiredBookings, config.BOOKING_EXPIRY_CHECK_INTERVAL_MS);
+     expiryInterval = setInterval(runExpiryCycle, config.BOOKING_EXPIRY_CHECK_INTERVAL_MS);
      logger.info(
-          `Booking expiry job started (interval: ${config.BOOKING_EXPIRY_CHECK_INTERVAL_MS}ms)`
+          `Booking expiry job started (interval: ${config.BOOKING_EXPIRY_CHECK_INTERVAL_MS}ms, ` +
+          `stuck threshold: ${config.STUCK_BOOKING_THRESHOLD_MS}ms)`
      );
 }
 

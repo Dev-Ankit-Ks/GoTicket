@@ -20,6 +20,12 @@ const config = {
      BOOKING_TTL_SECONDS: parseInt(process.env.BOOKING_TTL_SECONDS || '600', 10),
      LOCK_TTL_SECONDS: parseInt(process.env.LOCK_TTL_SECONDS || '600', 10),
      BOOKING_EXPIRY_CHECK_INTERVAL_MS: parseInt(process.env.BOOKING_EXPIRY_CHECK_INTERVAL_MS || '30000', 10),
+
+     // How long a booking may sit in a transient state (CONFIRMING / CANCELLING)
+     // before the sweeper assumes the owning process died and resumes the saga.
+     // Must exceed a worst-case confirm — inventory call with retries — so we never
+     // interfere with a request that is merely slow.
+     STUCK_BOOKING_THRESHOLD_MS: parseInt(process.env.STUCK_BOOKING_THRESHOLD_MS || '120000', 10),
 }
 
 module.exports = { config };

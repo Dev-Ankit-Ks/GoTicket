@@ -26,7 +26,7 @@ exports.getScheduleSeats = asyncHandler(async (req, res) => {
 });
 
 exports.lockSeats = asyncHandler(async (req, res) => {
-     const { scheduleId, seatIds, ttlSeconds, userId, fromSeq, toSeq } = req.body; // --- SEGMENT BOOKING: added fromSeq/toSeq
+     const { scheduleId, seatIds, ttlSeconds, userId, fromSeq, toSeq, idempotencyKey } = req.body; // --- SEGMENT BOOKING: added fromSeq/toSeq
 
      if (!scheduleId || !seatIds || !Array.isArray(seatIds) || seatIds.length === 0) {
           throw new BadRequestError('scheduleId and seatIds (non-empty array) are required');
@@ -36,7 +36,7 @@ exports.lockSeats = asyncHandler(async (req, res) => {
           throw new BadRequestError('userId is required');
      }
 
-     const result = await inventoryService.lockSeats(scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq); // --- SEGMENT BOOKING
+     const result = await inventoryService.lockSeats(scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq, idempotencyKey); // --- SEGMENT BOOKING
 
      res.status(200).json({
           success: true,
@@ -50,7 +50,7 @@ exports.lockSeats = asyncHandler(async (req, res) => {
 });
 
 exports.unlockSeats = asyncHandler(async (req, res) => {
-     const { scheduleId, seatIds, userId, fromSeq, toSeq } = req.body; // --- SEGMENT BOOKING: added fromSeq/toSeq
+     const { scheduleId, seatIds, userId, fromSeq, toSeq, idempotencyKey } = req.body; // --- SEGMENT BOOKING: added fromSeq/toSeq
 
      if (!scheduleId || !seatIds || !Array.isArray(seatIds) || seatIds.length === 0) {
           throw new BadRequestError('scheduleId and seatIds (non-empty array) are required');
@@ -60,7 +60,7 @@ exports.unlockSeats = asyncHandler(async (req, res) => {
           throw new BadRequestError('userId is required');
      }
 
-     const result = await inventoryService.unlockSeats(scheduleId, seatIds, userId, fromSeq, toSeq); // --- SEGMENT BOOKING
+     const result = await inventoryService.unlockSeats(scheduleId, seatIds, userId, fromSeq, toSeq, idempotencyKey); // --- SEGMENT BOOKING
 
      res.status(200).json({
           success: true,
@@ -73,7 +73,7 @@ exports.unlockSeats = asyncHandler(async (req, res) => {
 });
 
 exports.confirmSeats = asyncHandler(async (req, res) => {
-     const { scheduleId, seatIds, bookingId, userId, fromSeq, toSeq } = req.body; // --- SEGMENT BOOKING: added fromSeq/toSeq
+     const { scheduleId, seatIds, bookingId, userId, fromSeq, toSeq, idempotencyKey } = req.body; // --- SEGMENT BOOKING: added fromSeq/toSeq
 
      if (!scheduleId || !seatIds || !Array.isArray(seatIds) || seatIds.length === 0) {
           throw new BadRequestError('scheduleId, seatIds (non-empty array), and bookingId are required');
@@ -87,7 +87,7 @@ exports.confirmSeats = asyncHandler(async (req, res) => {
           throw new BadRequestError('userId is required');
      }
 
-     const result = await inventoryService.confirmSeats(scheduleId, seatIds, userId, bookingId, fromSeq, toSeq); // --- SEGMENT BOOKING
+     const result = await inventoryService.confirmSeats(scheduleId, seatIds, userId, bookingId, fromSeq, toSeq, idempotencyKey); // --- SEGMENT BOOKING
 
      res.status(200).json({
           success: true,
@@ -101,7 +101,7 @@ exports.confirmSeats = asyncHandler(async (req, res) => {
 });
 
 exports.cancelBooking = asyncHandler(async (req, res) => {
-     const { scheduleId, bookingId, userId } = req.body;
+     const { scheduleId, bookingId, userId, idempotencyKey } = req.body;
 
      if (!scheduleId || !bookingId) {
           throw new BadRequestError('scheduleId and bookingId are required');
@@ -111,7 +111,7 @@ exports.cancelBooking = asyncHandler(async (req, res) => {
           throw new BadRequestError('userId is required');
      }
 
-     const result = await inventoryService.cancelBooking(scheduleId, bookingId, userId);
+     const result = await inventoryService.cancelBooking(scheduleId, bookingId, userId, idempotencyKey);
 
      res.status(200).json({
           success: true,

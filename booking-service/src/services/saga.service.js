@@ -31,7 +31,8 @@ async function executeHoldSeats(booking, seatIds, ttlSeconds, fromSeq, toSeq) {
                booking.userId,
                ttlSeconds,
                fromSeq,  // --- SEGMENT BOOKING
-               toSeq     // --- SEGMENT BOOKING
+               toSeq,    // --- SEGMENT BOOKING
+               booking.id // idempotency: stable across retries of this hold
           );
 
           await prisma.sagaLog.update({
@@ -148,7 +149,7 @@ async function compensateHoldSeats(booking, seatIds) {
      logger.info(`Compensating HOLD_SEATS for booking ${booking.id}`);
      try {
           // --- SEGMENT BOOKING: Pass segment params from booking for accurate compensation ---
-          await inventoryClient.releaseSeats(booking.scheduleId, seatIds, booking.userId, booking.fromSeq, booking.toSeq);
+          await inventoryClient.releaseSeats(booking.scheduleId, seatIds, booking.userId, booking.fromSeq, booking.toSeq, booking.id);
 
           // Mark saga step as compensated
           await prisma.sagaLog.updateMany({
