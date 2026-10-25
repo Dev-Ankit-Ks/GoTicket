@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const { config } = require('../config');
 const jwt = require('jsonwebtoken')
 const logger = require('../config/logger');
-const {UnauthorizedError} = require('./error');
+const { UnauthorizedError } = require('./error');
 
 exports.hashToken = (refreshToken) => {
      return crypto.createHash('sha256').update(refreshToken).digest('hex');

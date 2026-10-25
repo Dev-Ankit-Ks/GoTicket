@@ -8,6 +8,8 @@ const config = {
   KAFKA_BROKER: process.env.KAFKA_BROKER,
   KAFKA_CLIENT_ID: process.env.KAFKA_CLIENT_ID,
   ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS,
+  KAFKA_USERNAME: process.env.KAFKA_USERNAME,
+  KAFKA_PASSWORD: process.env.KAFKA_PASSWORD,
 
   OTP_TTL: process.env.OTP_TTL || 300,
   OTP_RATE_MAX_PER_HOUR: process.env.OTP_RATE_MAX_PER_HOUR || 5,
@@ -23,19 +25,20 @@ const config = {
   REDIS_USER_TTL: Number(process.env.REDIS_USER_TTL || 86400),
 
 
+
   MAIL_SEND: process.env.MAIL_SEND,
   SENDGRID_API_KEY: process.env.SENDGRID_API_KEY,
 
-  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
-  GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+  // GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+  // GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
 
   INTERNAL_SERVICE_KEY: process.env.INTERNAL_SERVICE_KEY,
 }
 
 
-if (!config.GOOGLE_CLIENT_ID) {
-  throw new Error("GOOGLE_CLIENT_ID environment variable is required");
-}
+// if (!config.GOOGLE_CLIENT_ID) {
+//   throw new Error("GOOGLE_CLIENT_ID environment variable is required");
+// }
 
 if (!config.SENDGRID_API_KEY) {
   throw new Error('SENDGRID_API_KEY missing');

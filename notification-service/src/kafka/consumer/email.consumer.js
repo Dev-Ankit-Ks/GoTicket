@@ -11,10 +11,22 @@ class EmailConsumer {
                await connectProducer(); // needed for DLQ publishing
                logger.info('Email consumer connected to Kafka');
 
-               await consumer.subscribe({
-                    topics: Object.values(KAFKA_TOPICS),
-                    fromBeginning: false
-               });
+               const emailTopics = [
+                    KAFKA_TOPICS.OTP_EMAIL,
+                    KAFKA_TOPICS.WELCOME_EMAIL,
+                    KAFKA_TOPICS.BOOKING_CONFIRMED,
+                    KAFKA_TOPICS.BOOKING_FAILED,
+                    KAFKA_TOPICS.BOOKING_CANCELLED,
+               ];
+
+               for (const topic of emailTopics) {
+                    await consumer.subscribe({
+                         topic,
+                         fromBeginning: false,
+                    });
+
+                    logger.info(`Subscribed to Kafka topic: ${topic}`);
+               }
 
                await consumer.run({
                     eachMessage: withDLQ(producer, KAFKA_TOPICS.DLQ_NOTIFICATION, logger, async ({ topic, parsedValue }) => {
@@ -25,7 +37,13 @@ class EmailConsumer {
 
                logger.info('Email consumer is running and listening for messages...');
           } catch (error) {
-               logger.error('Failed to start email consumer', { error: error.message });
+               logger.error('Failed to start email consumer', {
+                    message: error.message,
+                    type: error.type,
+                    code: error.code,
+                    stack: error.stack,
+               });
+
                throw error;
           }
      }
