@@ -1,9 +1,6 @@
 # 🚆 IRCTC Backend - Microservices Architecture
 
 > A production-grade microservices-based railway booking system backend, built for learning and demonstrating enterprise architecture patterns.
-
-**YouTube Tutorial Series**: https://youtu.be/K_cTtCXCPeY?si=VLIxFdgK2k3XraXA
-
 ---
 
 ## 📋 Table of Contents
